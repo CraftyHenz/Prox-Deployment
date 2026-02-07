@@ -302,43 +302,78 @@ deploy_observium() {
     
     msg_info "Installing Observium dependencies..."
     exec_in_ct $CTID "apt-get update && apt-get upgrade -y"
-    exec_in_ct $CTID "apt-get install -y libapache2-mod-php php php-cli php-mysql php-gd php-bcmath php-mbstring php-opcache php-apcu php-xml php-curl snmp fping mariadb-server mariadb-client python3-pymysql python3-dotenv rrdtool subversion whois mtr-tiny ipmitool graphviz imagemagick apache2 wget"
+    exec_in_ct $CTID "apt-get install -y libapache2-mod-php php-cli php-mysql php-gd php-bcmath php-mbstring php-opcache php-apcu php-curl php-json php-pear snmp fping mariadb-server mariadb-client python3-mysqldb python-is-python3 python3-pymysql rrdtool subversion whois mtr-tiny ipmitool graphviz imagemagick apache2"
     
-    msg_info "Setting up MariaDB..."
+    msg_info "Downloading Observium Community Edition..."
+    exec_in_ct $CTID "mkdir -p /opt/observium && cd /opt"
+    exec_in_ct $CTID "wget http://www.observium.org/observium-community-latest.tar.gz -O /tmp/observium.tar.gz"
+    exec_in_ct $CTID "tar zxvf /tmp/observium.tar.gz -C /opt/"
+    
+    msg_info "Setting up MySQL database..."
     exec_in_ct $CTID "systemctl start mariadb"
     local DB_PASS=$(openssl rand -base64 12)
     exec_in_ct $CTID "mysql -e \"CREATE DATABASE observium DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci;\""
     exec_in_ct $CTID "mysql -e \"CREATE USER 'observium'@'localhost' IDENTIFIED BY '$DB_PASS';\""
-    exec_in_ct $CTID "mysql -e \"GRANT ALL PRIVILEGES ON observium.* TO 'observium'@'localhost';\""
+    exec_in_ct $CTID "mysql -e \"GRANT ALL ON observium.* TO 'observium'@'localhost';\""
     exec_in_ct $CTID "mysql -e \"FLUSH PRIVILEGES;\""
     
-    msg_info "Installing Observium Community Edition..."
-    exec_in_ct $CTID "mkdir -p /opt/observium && cd /opt/observium"
-    exec_in_ct $CTID "wget http://www.observium.org/observium-community-latest.tar.gz -O /tmp/observium.tar.gz"
-    exec_in_ct $CTID "tar zxvf /tmp/observium.tar.gz -C /opt/"
+    msg_info "Configuring Observium..."
     exec_in_ct $CTID "cd /opt/observium && cp config.php.default config.php"
-    exec_in_ct $CTID "sed -i \"s/\\\$config\['db_user'\] = 'USERNAME';/\\\$config['db_user'] = 'observium';/\" /opt/observium/config.php"
-    exec_in_ct $CTID "sed -i \"s/\\\$config\['db_pass'\] = 'PASSWORD';/\\\$config['db_pass'] = '$DB_PASS';/\" /opt/observium/config.php"
-    exec_in_ct $CTID "cd /opt/observium && ./discovery.php -u"
-    exec_in_ct $CTID "chown -R www-data:www-data /opt/observium"
+    exec_in_ct $CTID "sed -i \"s/\\\$config\\['db_user'\\] = 'USERNAME';/\\\$config['db_user'] = 'observium';/\" /opt/observium/config.php"
+    exec_in_ct $CTID "sed -i \"s/\\\$config\\['db_pass'\\] = 'PASSWORD';/\\\$config['db_pass'] = '$DB_PASS';/\" /opt/observium/config.php"
     
-    exec_in_ct $CTID "cat > /etc/apache2/sites-available/observium.conf << 'EOF'
+    msg_info "Initializing database..."
+    exec_in_ct $CTID "cd /opt/observium && ./discovery.php -u"
+    
+    msg_info "Creating required directories..."
+    exec_in_ct $CTID "cd /opt/observium && mkdir -p logs rrd"
+    exec_in_ct $CTID "chown www-data:www-data /opt/observium/rrd"
+    exec_in_ct $CTID "chown www-data:www-data /opt/observium/logs"
+    
+    msg_info "Configuring Apache..."
+    exec_in_ct $CTID "cat > /etc/apache2/sites-available/000-default.conf << 'EOFAPACHE'
 <VirtualHost *:80>
+    ServerAdmin webmaster@localhost
     DocumentRoot /opt/observium/html
-    ServerName observium
-    <Directory /opt/observium/html>
-        AllowOverride All
-        Require all granted
+    <FilesMatch \\.php$>
+      SetHandler application/x-httpd-php
+    </FilesMatch>
+    <Directory />
+            Options FollowSymLinks
+            AllowOverride None
     </Directory>
+    <Directory /opt/observium/html/>
+            DirectoryIndex index.php
+            Options Indexes FollowSymLinks MultiViews
+            AllowOverride All
+            Require all granted
+    </Directory>
+    ErrorLog  \${APACHE_LOG_DIR}/error.log
+    LogLevel warn
+    CustomLog  \${APACHE_LOG_DIR}/access.log combined
+    ServerSignature On
 </VirtualHost>
-EOF"
-    exec_in_ct $CTID "a2dissite 000-default"
-    exec_in_ct $CTID "a2ensite observium"
+EOFAPACHE"
+    
     exec_in_ct $CTID "a2enmod rewrite"
     exec_in_ct $CTID "systemctl restart apache2"
     
+    msg_info "Creating admin user..."
     local ADMIN_PASS=$(openssl rand -base64 12)
     exec_in_ct $CTID "cd /opt/observium && ./adduser.php admin $ADMIN_PASS 10"
+    
+    msg_info "Running initial discovery and polling..."
+    exec_in_ct $CTID "cd /opt/observium && ./discovery.php -h all"
+    exec_in_ct $CTID "cd /opt/observium && ./poller.php -h all"
+    
+    msg_info "Setting up cron jobs..."
+    exec_in_ct $CTID "cat > /etc/cron.d/observium << 'EOFCRON'
+33  */6   * * *   root    /opt/observium/observium-wrapper discovery >> /dev/null 2>&1
+*/5 *     * * *   root    /opt/observium/observium-wrapper discovery --host new >> /dev/null 2>&1
+*/5 *     * * *   root    /opt/observium/observium-wrapper poller >> /dev/null 2>&1
+13 5 * * * root /opt/observium/housekeeping.php -ysel >> /dev/null 2>&1
+47 4 * * * root /opt/observium/housekeeping.php -yrptb >> /dev/null 2>&1
+EOFCRON"
     
     msg_ok "Observium deployed on CT $CTID"
     msg_info "Access Observium at: http://$(pct exec $CTID -- hostname -I | awk '{print $1}')"
