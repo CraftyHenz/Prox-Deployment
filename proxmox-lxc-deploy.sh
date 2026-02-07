@@ -46,6 +46,52 @@ get_next_ctid() {
     echo $next_id
 }
 
+# Function to get CTID from user
+get_ctid_from_user() {
+    local service_name=$1
+    local suggested_id=$(get_next_ctid)
+    
+    echo -e "${BLUE}[INFO]${NC} Next available Container ID: $suggested_id" >&2
+    read -p "Enter Container ID for $service_name (press Enter for $suggested_id): " user_ctid
+    
+    if [ -z "$user_ctid" ]; then
+        echo $suggested_id
+    else
+        # Validate the ID
+        if ! [[ "$user_ctid" =~ ^[0-9]+$ ]]; then
+            echo -e "${RED}[ERROR]${NC} Invalid Container ID. Must be a number." >&2
+            exit 1
+        fi
+        
+        if pct status $user_ctid &>/dev/null; then
+            echo -e "${RED}[ERROR]${NC} Container ID $user_ctid already exists!" >&2
+            exit 1
+        fi
+        
+        echo $user_ctid
+    fi
+}
+
+# Function to get hostname from user
+get_hostname_from_user() {
+    local service_name=$1
+    local default_hostname=$2
+    
+    read -p "Enter hostname for $service_name (press Enter for '$default_hostname'): " user_hostname
+    
+    if [ -z "$user_hostname" ]; then
+        echo $default_hostname
+    else
+        # Validate hostname (alphanumeric and hyphens only, no spaces)
+        if ! [[ "$user_hostname" =~ ^[a-zA-Z0-9-]+$ ]]; then
+            echo -e "${RED}[ERROR]${NC} Invalid hostname. Use only letters, numbers, and hyphens." >&2
+            exit 1
+        fi
+        
+        echo $user_hostname
+    fi
+}
+
 # Function to select storage
 select_storage() {
     msg_info "Available storage:"
@@ -59,15 +105,26 @@ get_network_config() {
     read -p "Enter bridge (default: vmbr0): " BRIDGE
     BRIDGE=${BRIDGE:-vmbr0}
     
-    read -p "Use DHCP? (y/n, default: y): " USE_DHCP
+    read -p "Use DHCP for all containers? (y/n, default: y): " USE_DHCP
     USE_DHCP=${USE_DHCP:-y}
     
     if [[ $USE_DHCP =~ ^[Nn]$ ]]; then
-        read -p "Enter IP address (e.g., 192.168.1.100/24): " IP_ADDRESS
-        read -p "Enter gateway: " GATEWAY
-        NET_CONFIG="name=eth0,bridge=$BRIDGE,ip=$IP_ADDRESS,gw=$GATEWAY"
+        USE_STATIC_IP="true"
+        read -p "Enter gateway (e.g., 10.1.10.254): " GATEWAY
     else
-        NET_CONFIG="name=eth0,bridge=$BRIDGE,ip=dhcp"
+        USE_STATIC_IP="false"
+    fi
+}
+
+# Function to get network config for specific container
+get_container_network() {
+    local HOSTNAME=$1
+    
+    if [[ $USE_STATIC_IP == "true" ]]; then
+        read -p "Enter IP address for $HOSTNAME (e.g., 10.1.10.11/24): " IP_ADDRESS
+        echo "name=eth0,bridge=$BRIDGE,ip=$IP_ADDRESS,gw=$GATEWAY"
+    else
+        echo "name=eth0,bridge=$BRIDGE,ip=dhcp"
     fi
 }
 
@@ -78,16 +135,18 @@ create_base_container() {
     local CORES=$3
     local RAM=$4
     local DISK=$5
-    local TEMPLATE=$6
+    
+    # Get network config for this specific container
+    local CONTAINER_NET_CONFIG=$(get_container_network "$HOSTNAME")
     
     msg_info "Creating LXC container $CTID ($HOSTNAME)..."
     
-    pct create $CTID $TEMPLATE \
+    pct create $CTID local:vztmpl/$TEMPLATE_NAME \
         --hostname $HOSTNAME \
         --cores $CORES \
         --memory $RAM \
         --swap 512 \
-        --net0 $NET_CONFIG \
+        --net0 "$CONTAINER_NET_CONFIG" \
         --storage $STORAGE \
         --rootfs $STORAGE:$DISK \
         --unprivileged 1 \
@@ -118,11 +177,10 @@ exec_in_ct() {
 deploy_pihole() {
     msg_info "=== Deploying Pi-hole ==="
     
-    local CTID=$(get_next_ctid)
-    local HOSTNAME="pihole"
-    local TEMPLATE="/var/lib/vz/template/cache/debian-12-standard_12.7-1_amd64.tar.zst"
+    local CTID=$(get_ctid_from_user "Pi-hole")
+    local HOSTNAME=$(get_hostname_from_user "Pi-hole" "pihole")
     
-    create_base_container $CTID $HOSTNAME 2 1024 8 $TEMPLATE
+    create_base_container $CTID $HOSTNAME 2 1024 8
     start_and_wait $CTID
     
     msg_info "Installing Pi-hole..."
@@ -141,18 +199,23 @@ deploy_pihole() {
 deploy_trilium() {
     msg_info "=== Deploying Trilium Notes ==="
     
-    local CTID=$(get_next_ctid)
-    local HOSTNAME="trilium"
-    local TEMPLATE="/var/lib/vz/template/cache/debian-12-standard_12.7-1_amd64.tar.zst"
+    local CTID=$(get_ctid_from_user "Trilium Notes")
+    local HOSTNAME=$(get_hostname_from_user "Trilium Notes" "trilium")
     
-    create_base_container $CTID $HOSTNAME 2 2048 16 $TEMPLATE
+    create_base_container $CTID $HOSTNAME 2 2048 16
     start_and_wait $CTID
     
     msg_info "Installing Trilium..."
     exec_in_ct $CTID "apt-get update && apt-get upgrade -y"
-    exec_in_ct $CTID "apt-get install -y wget"
-    exec_in_ct $CTID "wget https://github.com/zadam/trilium/releases/latest/download/trilium-linux-x64-server.tar.xz -O /tmp/trilium.tar.xz"
-    exec_in_ct $CTID "tar -xvf /tmp/trilium.tar.xz -C /opt/"
+    exec_in_ct $CTID "apt-get install -y wget curl jq"
+    
+    # Get the latest release URL and download
+    msg_info "Downloading latest TriliumNext server..."
+    exec_in_ct $CTID 'curl -sL https://api.github.com/repos/TriliumNext/Notes/releases/latest | jq -r ".assets[] | select(.name | test(\"TriliumNextNotes-.*-linux-x64.tar.xz\")) | .browser_download_url" > /tmp/trilium_url.txt'
+    exec_in_ct $CTID "wget -i /tmp/trilium_url.txt -O /tmp/trilium.tar.xz"
+    exec_in_ct $CTID "tar -xvf /tmp/trilium.tar.xz -C /tmp/"
+    exec_in_ct $CTID 'mv /tmp/TriliumNextNotes-*-linux-x64 /opt/trilium'
+    
     exec_in_ct $CTID "cat > /etc/systemd/system/trilium.service << 'EOF'
 [Unit]
 Description=Trilium Notes
@@ -160,8 +223,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/opt/trilium-linux-x64-server/trilium.sh
-WorkingDirectory=/opt/trilium-linux-x64-server
+ExecStart=/opt/trilium/trilium.sh
+WorkingDirectory=/opt/trilium
 Restart=always
 User=root
 
@@ -179,11 +242,10 @@ EOF"
 deploy_homarr() {
     msg_info "=== Deploying Homarr ==="
     
-    local CTID=$(get_next_ctid)
-    local HOSTNAME="homarr"
-    local TEMPLATE="/var/lib/vz/template/cache/debian-12-standard_12.7-1_amd64.tar.zst"
+    local CTID=$(get_ctid_from_user "Homarr")
+    local HOSTNAME=$(get_hostname_from_user "Homarr" "homarr")
     
-    create_base_container $CTID $HOSTNAME 2 2048 12 $TEMPLATE
+    create_base_container $CTID $HOSTNAME 2 2048 12
     start_and_wait $CTID
     
     msg_info "Installing Docker and Homarr..."
@@ -207,11 +269,10 @@ deploy_homarr() {
 deploy_observium() {
     msg_info "=== Deploying Observium ==="
     
-    local CTID=$(get_next_ctid)
-    local HOSTNAME="observium"
-    local TEMPLATE="/var/lib/vz/template/cache/debian-12-standard_12.7-1_amd64.tar.zst"
+    local CTID=$(get_ctid_from_user "Observium")
+    local HOSTNAME=$(get_hostname_from_user "Observium" "observium")
     
-    create_base_container $CTID $HOSTNAME 2 4096 20 $TEMPLATE
+    create_base_container $CTID $HOSTNAME 2 4096 20
     start_and_wait $CTID
     
     msg_info "Installing Observium dependencies..."
@@ -265,11 +326,10 @@ EOF"
 deploy_unifi() {
     msg_info "=== Deploying UniFi Controller ==="
     
-    local CTID=$(get_next_ctid)
-    local HOSTNAME="unifi"
-    local TEMPLATE="/var/lib/vz/template/cache/debian-12-standard_12.7-1_amd64.tar.zst"
+    local CTID=$(get_ctid_from_user "UniFi Controller")
+    local HOSTNAME=$(get_hostname_from_user "UniFi Controller" "unifi")
     
-    create_base_container $CTID $HOSTNAME 2 2048 16 $TEMPLATE
+    create_base_container $CTID $HOSTNAME 2 2048 16
     start_and_wait $CTID
     
     msg_info "Installing UniFi Controller..."
@@ -313,12 +373,25 @@ main() {
     check_root
     
     # Download Debian template if not exists
-    TEMPLATE_PATH="/var/lib/vz/template/cache/debian-12-standard_12.7-1_amd64.tar.zst"
+    msg_info "Checking for Debian 12 template..."
+    pveam update
+    
+    # Get the latest Debian 12 template name
+    TEMPLATE_NAME=$(pveam available | grep -i "debian-12-standard" | sort -V | tail -n1 | awk '{print $2}')
+    
+    if [ -z "$TEMPLATE_NAME" ]; then
+        msg_error "No Debian 12 template found in repository"
+        exit 1
+    fi
+    
+    TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE_NAME"
+    
     if [ ! -f "$TEMPLATE_PATH" ]; then
-        msg_info "Downloading Debian 12 template..."
-        pveam update
-        pveam download local debian-12-standard_12.7-1_amd64.tar.zst
-        msg_ok "Template downloaded"
+        msg_info "Downloading Debian 12 template: $TEMPLATE_NAME..."
+        pveam download local "$TEMPLATE_NAME"
+        msg_ok "Template downloaded: $TEMPLATE_NAME"
+    else
+        msg_ok "Template already exists: $TEMPLATE_NAME"
     fi
     
     select_storage
