@@ -151,8 +151,12 @@ create_base_container() {
         --rootfs $STORAGE:$DISK \
         --unprivileged 1 \
         --features nesting=1 \
+        --nameserver 10.1.10.254 \
         --onboot 1 \
         --start 0
+    
+    # Add AppArmor unconfined for Docker support
+    echo "lxc.apparmor.profile: unconfined" >> /etc/pve/lxc/${CTID}.conf
     
     msg_ok "Container $CTID created"
 }
@@ -259,7 +263,28 @@ deploy_homarr() {
     exec_in_ct $CTID "apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin"
     
     exec_in_ct $CTID "mkdir -p /opt/homarr/configs /opt/homarr/icons /opt/homarr/data"
-    exec_in_ct $CTID "docker run -d --name homarr --restart=unless-stopped -p 7575:7575 -v /opt/homarr/configs:/app/data/configs -v /opt/homarr/icons:/app/public/icons -v /opt/homarr/data:/data ghcr.io/ajnart/homarr:latest"
+    exec_in_ct $CTID "mkdir -p /opt/docker"
+    
+    # Create docker-compose file
+    exec_in_ct $CTID "cat > /opt/docker/docker-compose.yml << 'EOFCOMPOSE'
+version: '3.8'
+
+services:
+  homarr:
+    image: ghcr.io/ajnart/homarr:latest
+    container_name: homarr
+    restart: unless-stopped
+    ports:
+      - \"7575:7575\"
+    volumes:
+      - /opt/homarr/configs:/app/data/configs
+      - /opt/homarr/icons:/app/public/icons
+      - /opt/homarr/data:/data
+    environment:
+      - TZ=Europe/London
+EOFCOMPOSE"
+    
+    exec_in_ct $CTID "cd /opt/docker && docker compose up -d"
     
     msg_ok "Homarr deployed on CT $CTID"
     msg_info "Access Homarr at: http://$(pct exec $CTID -- hostname -I | awk '{print $1}'):7575"
