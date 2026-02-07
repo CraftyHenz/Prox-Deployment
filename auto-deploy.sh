@@ -41,36 +41,37 @@ GATEWAY="10.1.10.254"
 
 # Service Deployments (set ENABLED=true to deploy)
 # Format: SERVICE_ENABLED, SERVICE_CTID, SERVICE_HOSTNAME, SERVICE_IP
+# NOTE: Listening port = last octet of the IP address
 
-# Pi-hole
-PIHOLE_ENABLED=false
-PIHOLE_CTID=110
-PIHOLE_HOSTNAME="pihole"
-PIHOLE_IP="10.1.10.10/24"
-
-# Trilium Notes
+# Trilium Notes (.11 = port 11)
 TRILIUM_ENABLED=true
 TRILIUM_CTID=101
 TRILIUM_HOSTNAME="Trilium-Notes"
 TRILIUM_IP="10.1.10.11/24"
 
-# Homarr Dashboard
+# Homarr Dashboard (.12 = port 12)
 HOMARR_ENABLED=true
 HOMARR_CTID=102
 HOMARR_HOSTNAME="Homarr"
 HOMARR_IP="10.1.10.12/24"
 
-# Observium
+# Observium (.13 = port 13)
 OBSERVIUM_ENABLED=false
 OBSERVIUM_CTID=103
 OBSERVIUM_HOSTNAME="observium"
 OBSERVIUM_IP="10.1.10.13/24"
 
-# UniFi Controller
+# UniFi Controller (.14 = port 14)
 UNIFI_ENABLED=false
 UNIFI_CTID=104
 UNIFI_HOSTNAME="unifi"
 UNIFI_IP="10.1.10.14/24"
+
+# Pi-hole (.53 = port 53 / DNS)
+PIHOLE_ENABLED=false
+PIHOLE_CTID=110
+PIHOLE_HOSTNAME="pihole"
+PIHOLE_IP="10.1.10.53/24"
 EOF
 
     msg_ok "Example config created at: $CONFIG_FILE"
@@ -81,6 +82,13 @@ fi
 # Load config
 msg_info "Loading configuration from: $CONFIG_FILE"
 source "$CONFIG_FILE"
+
+# Extract last octet from IP (used as the listening port)
+get_port_from_ip() {
+    local IP_WITH_CIDR=$1
+    local IP_ONLY="${IP_WITH_CIDR%/*}"
+    echo "${IP_ONLY##*.}"
+}
 
 msg_info "Configuration loaded:"
 msg_info "  Storage: $STORAGE"
@@ -128,6 +136,7 @@ deploy_service() {
         local CTID=${!CTID_VAR}
         local HOSTNAME=${!HOSTNAME_VAR}
         local IP=${!IP_VAR}
+        local PORT=$(get_port_from_ip "$IP")
 
         # Check if container already exists
         if pct status $CTID &>/dev/null; then
@@ -138,6 +147,7 @@ deploy_service() {
         msg_info "  CTID: $CTID"
         msg_info "  Hostname: $HOSTNAME"
         msg_info "  IP: $IP"
+        msg_info "  Port: $PORT"
 
         # Set network config for this container
         export NET_CONFIG="name=eth0,bridge=$BRIDGE,ip=$IP,gw=$GATEWAY"
@@ -146,11 +156,12 @@ deploy_service() {
         create_base_container $CTID "$HOSTNAME" ${4:-2} ${5:-2048} ${6:-16}
         start_and_wait $CTID
 
-        # Run deployment function
-        $DEPLOY_FUNC
+        # Run deployment function with port
+        $DEPLOY_FUNC $PORT
 
+        local IP_ONLY="${IP%/*}"
         msg_ok "$SERVICE_NAME deployed successfully!"
-        msg_info "Access at: ${7}"
+        msg_info "Access at: ${7}${IP_ONLY}:${PORT}"
     else
         msg_info "Skipping $SERVICE_NAME (not enabled in config)"
     fi
@@ -158,29 +169,35 @@ deploy_service() {
 
 # Function wrappers that use the CTID from config
 deploy_pihole_auto() {
+    local PORT=${1:-53}
     local CTID=$PIHOLE_CTID
-    msg_info "Installing Pi-hole..."
+    msg_info "Installing Pi-hole on port $PORT..."
     exec_in_ct $CTID "apt-get update && apt-get upgrade -y"
     exec_in_ct $CTID "apt-get install -y curl"
     exec_in_ct $CTID "curl -sSL https://install.pi-hole.net | bash /dev/stdin --unattended"
+    # Pi-hole DNS listens on port 53 by default which matches .53 last octet
+    # Web admin is on port 80 within the container
 }
 
 deploy_trilium_auto() {
+    local PORT=${1:-11}
     local CTID=$TRILIUM_CTID
-    msg_info "Installing Trilium..."
+    msg_info "Installing Trilium on port $PORT..."
     exec_in_ct $CTID "apt-get update && apt-get upgrade -y"
     exec_in_ct $CTID "apt-get install -y wget curl jq"
     exec_in_ct $CTID 'curl -sL https://api.github.com/repos/TriliumNext/Notes/releases/latest | jq -r ".assets[] | select(.name | test(\"TriliumNextNotes-.*-linux-x64.tar.xz\")) | .browser_download_url" > /tmp/trilium_url.txt'
     exec_in_ct $CTID "wget -i /tmp/trilium_url.txt -O /tmp/trilium.tar.xz"
     exec_in_ct $CTID "tar -xvf /tmp/trilium.tar.xz -C /tmp/"
     exec_in_ct $CTID 'mv /tmp/TriliumNextNotes-*-linux-x64 /opt/trilium'
-    exec_in_ct $CTID "cat > /etc/systemd/system/trilium.service << 'EOFS'
+    # Configure Trilium to listen on custom port
+    exec_in_ct $CTID "cat > /etc/systemd/system/trilium.service << EOFS
 [Unit]
 Description=Trilium Notes
 After=network.target
 
 [Service]
 Type=simple
+Environment=TRILIUM_PORT=$PORT
 ExecStart=/opt/trilium/trilium.sh
 WorkingDirectory=/opt/trilium
 Restart=always
@@ -194,8 +211,9 @@ EOFS"
 }
 
 deploy_homarr_auto() {
+    local PORT=${1:-12}
     local CTID=$HOMARR_CTID
-    msg_info "Installing Docker and Homarr..."
+    msg_info "Installing Docker and Homarr on port $PORT..."
     exec_in_ct $CTID "apt-get update && apt-get upgrade -y"
     exec_in_ct $CTID "apt-get install -y curl ca-certificates"
     exec_in_ct $CTID "install -m 0755 -d /etc/apt/keyrings"
@@ -205,19 +223,24 @@ deploy_homarr_auto() {
     exec_in_ct $CTID "apt-get update"
     exec_in_ct $CTID "apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin"
     exec_in_ct $CTID "mkdir -p /opt/homarr/configs /opt/homarr/icons /opt/homarr/data"
-    exec_in_ct $CTID "docker run -d --name homarr --restart=unless-stopped -p 7575:7575 -v /opt/homarr/configs:/app/data/configs -v /opt/homarr/icons:/app/public/icons -v /opt/homarr/data:/data ghcr.io/ajnart/homarr:latest"
+    # Map custom port to Homarr's internal port 7575
+    exec_in_ct $CTID "docker run -d --name homarr --restart=unless-stopped -p $PORT:7575 -v /opt/homarr/configs:/app/data/configs -v /opt/homarr/icons:/app/public/icons -v /opt/homarr/data:/data ghcr.io/ajnart/homarr:latest"
 }
 
 deploy_observium_auto() {
+    local PORT=${1:-13}
     local CTID=$OBSERVIUM_CTID
-    msg_info "Installing Observium..."
+    msg_info "Installing Observium on port $PORT..."
     msg_warn "Observium installation is complex and takes 10-15 minutes"
+    # Configure Apache to listen on custom port
     # Add full observium deployment here
 }
 
 deploy_unifi_auto() {
+    local PORT=${1:-14}
     local CTID=$UNIFI_CTID
-    msg_info "Installing UniFi Controller..."
+    msg_info "Installing UniFi Controller on port $PORT..."
+    # Configure UniFi to listen on custom port
     # Add full unifi deployment here
 }
 
@@ -226,22 +249,22 @@ msg_info ""
 msg_info "Starting automated deployment..."
 msg_info ""
 
-deploy_service "Pi-hole" "PIHOLE" "deploy_pihole_auto" 2 1024 8 "http://$PIHOLE_IP/admin"
-deploy_service "Trilium Notes" "TRILIUM" "deploy_trilium_auto" 2 2048 16 "http://${TRILIUM_IP%/*}:8080"
-deploy_service "Homarr" "HOMARR" "deploy_homarr_auto" 2 2048 12 "http://${HOMARR_IP%/*}:7575"
-deploy_service "Observium" "OBSERVIUM" "deploy_observium_auto" 2 4096 20 "http://${OBSERVIUM_IP%/*}"
-deploy_service "UniFi Controller" "UNIFI" "deploy_unifi_auto" 2 2048 16 "https://${UNIFI_IP%/*}:8443"
+deploy_service "Trilium Notes" "TRILIUM" "deploy_trilium_auto" 2 2048 16 "http://"
+deploy_service "Homarr" "HOMARR" "deploy_homarr_auto" 2 2048 12 "http://"
+deploy_service "Observium" "OBSERVIUM" "deploy_observium_auto" 2 4096 20 "http://"
+deploy_service "UniFi Controller" "UNIFI" "deploy_unifi_auto" 2 2048 16 "https://"
+deploy_service "Pi-hole" "PIHOLE" "deploy_pihole_auto" 2 1024 8 "http://"
 
 msg_ok ""
 msg_ok "=== Deployment Complete ==="
 msg_info ""
 msg_info "Deployed Services:"
 
-[ "$PIHOLE_ENABLED" = "true" ] && echo "  Pi-hole (CT $PIHOLE_CTID): http://${PIHOLE_IP%/*}/admin"
-[ "$TRILIUM_ENABLED" = "true" ] && echo "  Trilium (CT $TRILIUM_CTID): http://${TRILIUM_IP%/*}:8080"
-[ "$HOMARR_ENABLED" = "true" ] && echo "  Homarr (CT $HOMARR_CTID): http://${HOMARR_IP%/*}:7575"
-[ "$OBSERVIUM_ENABLED" = "true" ] && echo "  Observium (CT $OBSERVIUM_CTID): http://${OBSERVIUM_IP%/*}"
-[ "$UNIFI_ENABLED" = "true" ] && echo "  UniFi (CT $UNIFI_CTID): https://${UNIFI_IP%/*}:8443"
+[ "$TRILIUM_ENABLED" = "true" ] && echo "  Trilium (CT $TRILIUM_CTID): http://${TRILIUM_IP%/*}:$(get_port_from_ip $TRILIUM_IP)"
+[ "$HOMARR_ENABLED" = "true" ] && echo "  Homarr (CT $HOMARR_CTID): http://${HOMARR_IP%/*}:$(get_port_from_ip $HOMARR_IP)"
+[ "$OBSERVIUM_ENABLED" = "true" ] && echo "  Observium (CT $OBSERVIUM_CTID): http://${OBSERVIUM_IP%/*}:$(get_port_from_ip $OBSERVIUM_IP)"
+[ "$UNIFI_ENABLED" = "true" ] && echo "  UniFi (CT $UNIFI_CTID): https://${UNIFI_IP%/*}:$(get_port_from_ip $UNIFI_IP)"
+[ "$PIHOLE_ENABLED" = "true" ] && echo "  Pi-hole (CT $PIHOLE_CTID): http://${PIHOLE_IP%/*}/admin (DNS on port $(get_port_from_ip $PIHOLE_IP))"
 
 msg_info ""
 msg_ok "All done!"
