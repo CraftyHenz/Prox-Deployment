@@ -319,8 +319,9 @@ deploy_observium() {
     
     msg_info "Configuring Observium..."
     exec_in_ct $CTID "cd /opt/observium && cp config.php.default config.php"
-    exec_in_ct $CTID "sed -i \"s/\\\$config\\['db_user'\\] = 'USERNAME';/\\\$config['db_user'] = 'observium';/\" /opt/observium/config.php"
-    exec_in_ct $CTID "sed -i \"s/\\\$config\\['db_pass'\\] = 'PASSWORD';/\\\$config['db_pass'] = '$DB_PASS';/\" /opt/observium/config.php"
+    # Use perl to replace the values since sed is having issues with escaping
+    exec_in_ct $CTID "perl -pi -e \"s/'USERNAME'/'observium'/g\" /opt/observium/config.php"
+    exec_in_ct $CTID "perl -pi -e \"s/'PASSWORD'/'$DB_PASS'/g\" /opt/observium/config.php"
     
     msg_info "Initializing database..."
     exec_in_ct $CTID "cd /opt/observium && ./discovery.php -u"
