@@ -1,0 +1,185 @@
+version: '3.8'
+
+#---------------------------------------------------------------------#
+#          Master Homelab Services - Docker Compose Stack            #
+#---------------------------------------------------------------------#
+# Services: Homarr, Trilium, Pi-hole, UniFi, Twingate Connector      #
+#---------------------------------------------------------------------#
+
+services:
+  #---------------------------------------------------------------------#
+  # Homarr - Dashboard for your homelab
+  # Access: http://YOUR-IP:7575
+  #---------------------------------------------------------------------#
+  homarr:
+    container_name: homarr
+    image: ghcr.io/homarr-labs/homarr:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock # Optional, for docker integration
+      - ./homarr/appdata:/appdata
+    environment:
+      - SECRET_ENCRYPTION_KEY=${HOMARR_ENCRYPTION_KEY}
+      - TZ=Europe/London
+    ports:
+      - '7575:7575'
+    networks:
+      - homelab
+
+  #---------------------------------------------------------------------#
+  # Trilium Notes - Hierarchical note taking application
+  # Access: http://YOUR-IP:8081 (changed from 8080 to avoid UniFi conflict)
+  #---------------------------------------------------------------------#
+  trilium:
+    container_name: trilium
+    image: triliumnext/notes:latest
+    restart: unless-stopped
+    volumes:
+      - ./trilium/data:/home/node/trilium-data
+    environment:
+      - TZ=Europe/London
+    ports:
+      - '8081:8080'
+    networks:
+      - homelab
+
+  #---------------------------------------------------------------------#
+  # Pi-hole - Network-wide ad blocking
+  # Access: http://YOUR-IP:8082/admin (changed from 80 to avoid conflicts)
+  # Default password: Set via WEBPASSWORD or use 'docker exec -it pihole pihole -a -p'
+  #---------------------------------------------------------------------#
+  pihole:
+    container_name: pihole
+    image: pihole/pihole:latest
+    restart: unless-stopped
+    hostname: pihole
+    volumes:
+      - ./pihole/etc-pihole:/etc/pihole
+      - ./pihole/etc-dnsmasq.d:/etc/dnsmasq.d
+    environment:
+      - TZ=Europe/London
+      - WEBPASSWORD=${PIHOLE_PASSWORD}
+      - FTLCONF_LOCAL_IPV4=${HOST_IP}
+      - WEB_PORT=8082
+    ports:
+      - '53:53/tcp'
+      - '53:53/udp'
+      - '8082:8082/tcp'
+    dns:
+      - 127.0.0.1
+      - 1.1.1.1
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - homelab
+
+  #---------------------------------------------------------------------#
+  # UniFi Controller - Network management
+  # Access: https://YOUR-IP:8443
+  # Initial setup will create admin account
+  #---------------------------------------------------------------------#
+  unifi:
+    container_name: unifi
+    image: lscr.io/linuxserver/unifi-network-application:latest
+    restart: unless-stopped
+    volumes:
+      - ./unifi/config:/config
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/London
+      - MONGO_HOST=unifi-db
+      - MONGO_PORT=27017
+      - MONGO_DBNAME=unifi
+      - MONGO_USER=unifi
+      - MONGO_PASS=${UNIFI_DB_PASSWORD}
+    ports:
+      - '8443:8443'   # Web admin
+      - '3478:3478/udp' # STUN
+      - '10001:10001/udp' # Device discovery
+      - '8080:8080'   # Device communication
+      - '1900:1900/udp' # Controller discoverable on L2 network
+      - '8843:8843'   # Guest portal HTTPS
+      - '8880:8880'   # Guest portal HTTP
+      - '6789:6789'   # Mobile throughput test
+      - '5514:5514/udp' # Remote syslog
+    depends_on:
+      - unifi-db
+    networks:
+      - homelab
+
+  #---------------------------------------------------------------------#
+  # UniFi Database - MongoDB for UniFi Controller
+  #---------------------------------------------------------------------#
+  unifi-db:
+    container_name: unifi-db
+    image: mongo:4.4
+    restart: unless-stopped
+    volumes:
+      - ./unifi/db:/data/db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=unifi
+      - MONGO_INITDB_ROOT_PASSWORD=${UNIFI_DB_PASSWORD}
+    networks:
+      - homelab
+
+  #---------------------------------------------------------------------#
+  # Twingate Connector - Zero Trust Network Access
+  # IMPORTANT: Set tokens in .env file before enabling
+  # Uncomment the service below when ready to deploy
+  #---------------------------------------------------------------------#
+  # twingate:
+  #   container_name: twingate-connector
+  #   image: twingate/connector:1
+  #   restart: unless-stopped
+  #   sysctls:
+  #     - net.ipv4.ping_group_range=0 2147483647
+  #   environment:
+  #     - TWINGATE_NETWORK=billwindle21
+  #     - TWINGATE_ACCESS_TOKEN=${TWINGATE_ACCESS_TOKEN}
+  #     - TWINGATE_REFRESH_TOKEN=${TWINGATE_REFRESH_TOKEN}
+  #     - TWINGATE_LABEL_HOSTNAME=${HOSTNAME}
+  #     - TWINGATE_LABEL_DEPLOYED_BY=docker-compose
+  #   networks:
+  #     - homelab
+
+networks:
+  homelab:
+    driver: bridge
+
+#---------------------------------------------------------------------#
+# IMPORTANT NOTES:
+#---------------------------------------------------------------------#
+# 
+# PORTS USED:
+#   - 7575: Homarr dashboard
+#   - 8081: Trilium Notes
+#   - 8082: Pi-hole web interface
+#   - 53: Pi-hole DNS
+#   - 8443: UniFi Controller
+#   - 8080: UniFi device communication
+#
+# ENVIRONMENT VARIABLES:
+# Create a .env file in the same directory with:
+#   HOMARR_ENCRYPTION_KEY=generate_with_openssl_rand_hex_32
+#   PIHOLE_PASSWORD=your_secure_password
+#   UNIFI_DB_PASSWORD=your_secure_password
+#   HOST_IP=10.1.10.xx
+#   HOSTNAME=docker-services
+#   TWINGATE_ACCESS_TOKEN=your_token_from_twingate
+#   TWINGATE_REFRESH_TOKEN=your_token_from_twingate
+#
+# FIRST TIME SETUP:
+# 1. Create directories: mkdir -p homarr trilium pihole unifi
+# 2. Create .env file with your passwords
+# 3. Run: docker compose up -d
+# 4. Check logs: docker compose logs -f
+#
+# UPDATING:
+# docker compose pull && docker compose up -d
+#
+# BACKUP:
+# Backup the entire directory containing docker-compose.yml
+# All data is in subdirectories (homarr/, trilium/, etc.)
+#
+#---------------------------------------------------------------------#
