@@ -12,7 +12,7 @@ services:
   # Access: http://YOUR-IP:7575
   #---------------------------------------------------------------------#
   homarr:
-    container_name: homarr
+    container_name: Homarr
     image: ghcr.io/homarr-labs/homarr:latest
     restart: unless-stopped
     volumes:
@@ -31,7 +31,7 @@ services:
   # Access: http://YOUR-IP:8081 (changed from 8080 to avoid UniFi conflict)
   #---------------------------------------------------------------------#
   trilium:
-    container_name: trilium
+    container_name: Trilium-Notes
     image: triliumnext/notes:latest
     restart: unless-stopped
     volumes:
@@ -49,7 +49,7 @@ services:
   # Default password: Set via WEBPASSWORD or use 'docker exec -it pihole pihole -a -p'
   #---------------------------------------------------------------------#
   pihole:
-    container_name: pihole
+    container_name: Pi-hole
     image: pihole/pihole:latest
     restart: unless-stopped
     hostname: pihole
@@ -67,7 +67,7 @@ services:
       - '8082:8082/tcp'
     dns:
       - 127.0.0.1
-      - 1.1.1.1
+      - 10.1.10.254
     cap_add:
       - NET_ADMIN
     networks:
@@ -79,7 +79,7 @@ services:
   # Initial setup will create admin account
   #---------------------------------------------------------------------#
   unifi:
-    container_name: unifi
+    container_name: Unifi-Controller
     image: lscr.io/linuxserver/unifi-network-application:latest
     restart: unless-stopped
     volumes:
