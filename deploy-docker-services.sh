@@ -136,7 +136,7 @@ msg_ok "Docker installed"
 # Create directory structure
 msg_info "Setting up docker-compose..."
 pct exec $CTID -- bash -c "mkdir -p /opt/docker-services"
-pct exec $CTID -- bash -c "cd /opt/docker-services && mkdir -p homarr/appdata trilium/data pihole/etc-pihole pihole/etc-dnsmasq.d unifi/config unifi/db"
+pct exec $CTID -- bash -c "cd /opt/docker-services && mkdir -p homarr/appdata portainer/data trilium/data pihole/etc-pihole pihole/etc-dnsmasq.d unifi/config unifi/db"
 
 # Download docker-compose file
 msg_info "Downloading docker-compose.yml..."
@@ -171,6 +171,7 @@ msg_ok "======================================"
 msg_info ""
 msg_info "Access your services:"
 msg_info "  Homarr Dashboard:  http://$HOST_IP_ONLY:7575"
+msg_info "  Portainer:         https://$HOST_IP_ONLY:9443 (or http://$HOST_IP_ONLY:9000)"
 msg_info "  Trilium Notes:     http://$HOST_IP_ONLY:8081"
 msg_info "  Pi-hole Admin:     http://$HOST_IP_ONLY:8082/admin"
 msg_info "  UniFi Controller:  https://$HOST_IP_ONLY:8443"
